@@ -1,10 +1,11 @@
 import streamlit as st
-import requests
 import datetime
-import json
+import os
+import sys
+import pickle
 
-# FastAPI backend URL
-API_URL = "http://localhost:8000"
+sys.path.insert(0, os.path.dirname(__file__))
+from ml_project.config import BEST_MODEL_PATH
 
 st.set_page_config(
     page_title="Flight Delay Predictor",
@@ -15,23 +16,20 @@ st.set_page_config(
 st.title("🛫 Flight Delay Prediction ML Platform")
 st.markdown("Enter flight details below to predict the probability of arrival delay (>15 mins).")
 
-# Check backend health
-@st.cache_data(ttl=5)
-def check_health():
-    try:
-        res = requests.get(f"{API_URL}/health", timeout=3)
-        return res.status_code == 200, res.json()
-    except Exception:
-        return False, None
+# ---- Model Loading ----
+@st.cache_resource
+def load_model():
+    if os.path.exists(BEST_MODEL_PATH):
+        with open(BEST_MODEL_PATH, "rb") as f:
+            return pickle.load(f)
+    return None
 
-is_up, health_data = check_health()
-if is_up:
-    if health_data.get("model_loaded"):
-        st.success("✅ Backend API is online and the ML model is loaded.")
-    else:
-        st.warning("⚠️ Backend API is online, but NO model is loaded. Have you run the training step?")
+model_payload = load_model()
+
+if model_payload:
+    st.success(f"✅ ML Model loaded successfully: **{model_payload['model_name']}**")
 else:
-    st.error("❌ Backend API is offline. Please make sure `python -m ml_project.api.main` is running.")
+    st.error(f"❌ Could not find model at {BEST_MODEL_PATH}. Please run the training pipeline first.")
 
 st.divider()
 
@@ -40,6 +38,7 @@ airlines = [
     "9E", "AA", "AS", "B6", "DL", "EV", "F9", "G4", "HA",
     "MQ", "NK", "OH", "OO", "QX", "UA", "VX", "WN", "YV", "YX"
 ]
+airline_map = {a: i for i, a in enumerate(sorted(airlines))}
 
 # Create form
 with st.form("prediction_form"):
@@ -59,78 +58,83 @@ with st.form("prediction_form"):
     submit_button = st.form_submit_button("Predict Delay")
 
 if submit_button:
-    if not is_up:
-        st.error("Cannot predict: Backend API is offline.")
+    if not model_payload:
+        st.error("Cannot predict: Model is not loaded.")
     else:
-        # Prepare payload
-        payload = {
-            "airline": airline,
-            "origin": origin,
-            "dest": dest,
-            "distance": distance,
-            "dep_delay": dep_delay,
-            "day_of_week": date.weekday(), # 0=Mon, 6=Sun
-            "month": date.month,
-            "day_of_month": date.day
-        }
-        
-        with st.spinner("Analyzing flight with XGBoost..."):
+        with st.spinner("Analyzing flight with ML model..."):
             try:
-                response = requests.post(f"{API_URL}/predict", json=payload, timeout=5)
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    prob = result["delay_probability"]
-                    prediction = result["prediction"]
-                    
-                    st.divider()
-                    st.subheader("Prediction Results")
-                    
-                    col1, col2 = st.columns(2)
-                    
-                    if prediction == "Delayed":
-                        col1.metric("Predicted Status", "🚨 Delayed")
-                    else:
-                        col1.metric("Predicted Status", "✅ On-Time")
-                        
-                    col2.metric("Delay Probability", f"{prob * 100:.1f}%")
-                    
-                    st.progress(min(prob, 1.0))
-                    
-                    if prob > 0.5:
-                        st.error(f"High risk of delay! ({prob*100:.1f}%)")
-                    elif prob > 0.3:
-                        st.warning(f"Moderate risk of delay. ({prob*100:.1f}%)")
-                    else:
-                        st.success(f"Flight is likely to arrive on time. ({prob*100:.1f}% delay chance)")
-                    
-                    st.caption(f"Model used: {result['model_used']} | Generated at: {result['timestamp']}")
+                # 1. Feature Engineering (Encode the input)
+                airline_code = airline_map.get(airline, -1)
+                day_of_week = date.weekday()
+                month = date.month
+                is_weekend = 1 if day_of_week in [5, 6] else 0
+
+                if distance <= 500:
+                    dist_bucket = 0
+                elif distance <= 1000:
+                    dist_bucket = 1
+                elif distance <= 2000:
+                    dist_bucket = 2
                 else:
-                    st.error(f"API Error ({response.status_code}): {response.text}")
+                    dist_bucket = 3
+
+                # Match feature order from training
+                raw_features = {
+                    "DEP_DELAY": dep_delay,
+                    "DISTANCE": distance,
+                    "AIRLINE_CODE": airline_code,
+                    "DAY_OF_WEEK": day_of_week,
+                    "MONTH": month,
+                    "IS_WEEKEND": is_weekend,
+                    "DISTANCE_BUCKET": dist_bucket,
+                    "ORIGIN_FREQ": 0.05,   # approximation for unseen in demo
+                    "DEST_FREQ": 0.05,
+                }
+                
+                feature_cols = model_payload["feature_cols"]
+                X = [[raw_features.get(col, 0) for col in feature_cols]]
+                
+                # 2. Predict
+                model = model_payload["model"]
+                prob = float(model.predict_proba(X)[0][1])
+                prediction = "Delayed" if prob >= 0.5 else "On-Time"
+                
+                st.divider()
+                st.subheader("Prediction Results")
+                
+                res_col1, res_col2 = st.columns(2)
+                
+                if prediction == "Delayed":
+                    res_col1.metric("Predicted Status", "🚨 Delayed")
+                else:
+                    res_col1.metric("Predicted Status", "✅ On-Time")
                     
-            except requests.exceptions.RequestException as e:
-                st.error(f"Failed to connect to backend: {e}")
+                res_col2.metric("Delay Probability", f"{prob * 100:.1f}%")
+                
+                st.progress(min(prob, 1.0))
+                
+                if prob > 0.5:
+                    st.error(f"High risk of delay! ({prob*100:.1f}%)")
+                elif prob > 0.3:
+                    st.warning(f"Moderate risk of delay. ({prob*100:.1f}%)")
+                else:
+                    st.success(f"Flight is likely to arrive on time. ({prob*100:.1f}% delay chance)")
+                
+                st.caption(f"Model used: {model_payload['model_name']} | Generated at: {datetime.datetime.now().isoformat()}")
+                
+            except Exception as e:
+                st.error(f"Prediction Error: {e}")
 
 # Sidebar info
 with st.sidebar:
     st.header("About")
     st.markdown("""
-    This frontend connects to the FastAPI backend running the final Machine Learning model.
-    The model was trained on the U.S. BTS On-Time Performance dataset.
+    This frontend is a **standalone** Streamlit application. It loads the saved XGBoost ML model directly and makes predictions without needing a separate FastAPI backend server.
     
-    **Stack:**
-    - Streamlit (UI)
-    - FastAPI (Backend)
-    - XGBoost (Model)
+    The model was trained on the U.S. BTS On-Time Performance dataset.
     """)
     
-    if is_up and health_data.get("model_loaded"):
+    if model_payload:
         st.divider()
         st.subheader("Model Info")
-        try:
-            info_res = requests.get(f"{API_URL}/model-info")
-            if info_res.status_code == 200:
-                info = info_res.json()
-                st.json(info["metrics"])
-        except Exception:
-            pass
+        st.json(model_payload["metrics"])

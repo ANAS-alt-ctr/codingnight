@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ML runtime
+mlruns/
+*.sqlite
+data/flight_db.sqlite
+*.pkl
+
+# Logs
+logs/
+*.jsonl
+drift_reports/
+
+# Datasets
+*.csv
+*.csv.zip
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Streamlit
+.streamlit/

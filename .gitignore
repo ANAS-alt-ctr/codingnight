@@ -7,7 +7,6 @@ __pycache__/
 mlruns/
 *.sqlite
 data/flight_db.sqlite
-*.pkl
 
 # Logs
 logs/
